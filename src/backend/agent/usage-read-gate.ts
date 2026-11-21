@@ -61,6 +61,10 @@ export class UsageReadGate {
     this.#nextReadAt = Date.now() + USAGE_READ_INTERVAL_MS;
   }
 
+  lastReadAtMs(): number {
+    return this.#readAt;
+  }
+
   reset(): void {
     this.#generation += 1;
     this.#failures = 0;

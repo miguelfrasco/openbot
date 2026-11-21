@@ -194,6 +194,7 @@ import {
   type PromptResponder,
 } from "./agent/attention-registry";
 import { AutoModelGate } from "./agent/auto-model/gate";
+import { quotaUsedPercentFromSnapshot } from "./agent/auto-model/quota-snapshot";
 import type { AvatarImageDecoder } from "./agent/avatar-file";
 import { backgroundModel, withBackgroundEffort } from "./agent/background-model";
 import { BootRecovery } from "./agent/boot-recovery";
@@ -2757,7 +2758,9 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     for (const entry of [...this.#usageLimits.failedModels(), ...this.#usageLimits.limitedModels()]) {
       if (entry.provider === provider) blocked.add(entry.model);
     }
-    return { usedPercent: null, blockedModels: blocked };
+    const snapshot = this.#providers.cachedUsageSnapshot(provider, agent.providerAccountId ?? undefined);
+    const usedPercent = quotaUsedPercentFromSnapshot(snapshot, null);
+    return { usedPercent, blockedModels: blocked };
   }
 
   notifyProviderSettingsChanged(): void {

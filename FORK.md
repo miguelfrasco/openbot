@@ -20,7 +20,8 @@ License files and PolyForm Noncommercial notices are unchanged.
 - **Routing:** Before each turn, heuristics (prompt size, code/diff markers, attachments, planning language, tool-heavy cues) pick a tier. Usage-limit and failed-model state from the existing `UsageLimitGate` steps tiers down. Opus and other paid tiers stay allowed; **Fable** is never auto-selected.
 - **Stickiness:** Tiers escalate after a failed turn in the same thread. They de-escalate on a new task, not every reply.
 - **Failover:** Provider backup models and usage-limit return paths are unchanged. Auto does not switch between Claude and Codex mid-thread.
-- **Configuration:** `OPENBOT_AUTO_CLASSIFY=0` disables the borderline tie-break (default is on). A future tiny Haiku classification call can plug in here; this fork uses heuristics only today.
+- **Quota step-down:** Uses the cached provider-account usage snapshot from the last successful usage read (`ProviderRuntime.cachedUsageSnapshot`). Snapshots older than 30 minutes, past their window duration, or after a window reset are ignored. At or above 80% used, Auto steps down one tier; at or above 95%, it picks the cheapest tier.
+- **Configuration:** `OPENBOT_AUTO_CLASSIFY=0` disables the borderline tie-break (default is on). **There is no Haiku (or other) classification API call in this fork** — routing is heuristics-only until a later change adds an optional classifier.
 - **UI:** No per-message model label. Debug logs use the `auto-model` logger.
 
 ## Upstream sync automation

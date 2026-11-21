@@ -89,8 +89,7 @@ export function tierIndexForComplexity(complexity: number, depth: number): numbe
 }
 
 export function applyQuotaStepDown(index: number, usedPercent: number | null, depth: number): number {
-  let next = index;
-  if (usedPercent !== null && usedPercent >= 95) next -= 2;
-  else if (usedPercent !== null && usedPercent >= 80) next -= 1;
-  return Math.max(0, Math.min(depth - 1, next));
+  if (usedPercent !== null && usedPercent >= 95) return 0;
+  if (usedPercent !== null && usedPercent >= 80) return Math.max(0, Math.min(depth - 1, index - 1));
+  return Math.max(0, Math.min(depth - 1, index));
 }
