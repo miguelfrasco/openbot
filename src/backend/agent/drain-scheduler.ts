@@ -26,6 +26,7 @@ import { channelLane, type DeliveryContext, laneChannelId, type MailboxStore, ME
 import type { MessagingThreads } from "../messaging/messaging-threads";
 import { decodeTurnResponse } from "../protocol";
 import { ProviderSignInError } from "../provider-client-effects";
+import type { AutoModelGate } from "./auto-model/gate";
 import type { ContextCompaction } from "./context-compaction";
 import type { ConversationRuntime } from "./conversation-runtime";
 import {
@@ -162,6 +163,7 @@ export interface DrainSchedulerOptions {
   threads: ThreadLifecycle;
   memory: MemoryHold;
   usageLimits: UsageLimitGate;
+  autoModel?: AutoModelGate;
   planContinuation: PlanContinuation;
   tasks: TaskLanes;
   hooks: DrainHooks;
@@ -182,6 +184,7 @@ export class DrainScheduler {
   readonly #threads: ThreadLifecycle;
   readonly #memory: MemoryHold;
   readonly #usageLimits: UsageLimitGate;
+  readonly #autoModel: AutoModelGate | undefined;
   readonly #planContinuation: PlanContinuation;
   readonly #tasks: TaskLanes;
   readonly #slots: TurnSlots;
@@ -220,6 +223,7 @@ export class DrainScheduler {
     this.#threads = options.threads;
     this.#memory = options.memory;
     this.#usageLimits = options.usageLimits;
+    this.#autoModel = options.autoModel;
     this.#planContinuation = options.planContinuation;
     this.#tasks = options.tasks;
     this.#hooks = options.hooks;
@@ -1018,6 +1022,29 @@ export class DrainScheduler {
       }
       this.#conversation.emitConversation(snapshot);
 
+      let runtimeModel = agent.model;
+      let runtimeEffort = agent.reasoningEffort;
+      if (this.#autoModel?.isAuto(agent)) {
+        const promptText = batch.map(({ delivery: item }) => item.text).join("\n");
+        const attachmentCount = batch.reduce((count, { delivery: item }) => count + item.attachments.length, 0);
+        const resolved = this.#autoModel.resolveTurn(agent, {
+          agentId: agent.id,
+          threadId,
+          text: promptText,
+          attachmentCount,
+          priorTurnCount: snapshot.messages.length,
+          contextChars: snapshot.messages.reduce(
+            (sum, message) => sum + (typeof message.text === "string" ? message.text.length : 0),
+            0,
+          ),
+          newTask: snapshot.messages.length <= batch.length,
+        });
+        if (resolved) {
+          runtimeModel = resolved.model;
+          runtimeEffort = resolved.effort;
+        }
+      }
+
       const startTurn = (providerThreadId: string) =>
         Effect.gen({ self: this }, function* () {
           yield* drainStep(requireServedModel);
@@ -1028,8 +1055,8 @@ export class DrainScheduler {
               "turn/start",
               {
                 threadId: providerThreadId,
-                model: agent.model,
-                effort: agent.reasoningEffort,
+                model: runtimeModel,
+                effort: runtimeEffort,
                 sessionSettings: sessionSettingsOverrides(
                   this.#store.list().find((current) => current.id === agent.id) ?? agent,
                 ),
@@ -1081,7 +1108,7 @@ export class DrainScheduler {
       this.#busyRetries.delete(agent.id);
       this.#turnModels.set(laneKey({ agentId: agent.id, taskId: laneId }), {
         turnId: response.turn.id,
-        model: agent.model,
+        model: runtimeModel,
       });
       for (const item of batch)
         yield* this.#mailbox.markRunning(item.delivery.id, response.turn.id).pipe(toDeliveryStartFailed);
