@@ -193,6 +193,8 @@ import {
   type LocalAttentionResponse,
   type PromptResponder,
 } from "./agent/attention-registry";
+import { AutoModelGate } from "./agent/auto-model/gate";
+import { quotaUsedPercentFromSnapshot } from "./agent/auto-model/quota-snapshot";
 import type { AvatarImageDecoder } from "./agent/avatar-file";
 import { backgroundModel, withBackgroundEffort } from "./agent/background-model";
 import { BootRecovery } from "./agent/boot-recovery";
@@ -560,6 +562,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #codexIdleSessions: CodexIdleSessions;
   readonly #memoryHold: MemoryHold;
   readonly #usageLimits: UsageLimitGate;
+  readonly #autoModel: AutoModelGate;
   readonly #drain: DrainScheduler;
   readonly #sessionSettings: SessionSettings;
   readonly #liveVoice: LiveVoice;
@@ -1698,6 +1701,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
           ),
       },
     });
+    this.#autoModel = new AutoModelGate({
+      listModels: () => this.#endpoints.available(),
+      quotaForAgent: (agent) => this.#autoModelQuota(agent),
+    });
     this.#drain = new DrainScheduler({
       channels: this.channels,
       messaging: this.messaging,
@@ -1713,6 +1720,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       threads: this.#threads,
       memory: this.#memoryHold,
       usageLimits: this.#usageLimits,
+      autoModel: this.#autoModel,
       planContinuation: this.#planContinuation,
       tasks: this.#tasks,
       hooks: {
@@ -2742,6 +2750,17 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       .accountModels(agent.provider, agent.providerAccountId)
       .filter((option) => !models.some((model) => model.provider === option.provider && model.id === option.id));
     return own.length ? [...models, ...own] : models;
+  }
+
+  #autoModelQuota(agent: AgentSummary): { usedPercent: number | null; blockedModels: ReadonlySet<string> } {
+    const provider = providerForAgent(agent);
+    const blocked = new Set<string>();
+    for (const entry of [...this.#usageLimits.failedModels(), ...this.#usageLimits.limitedModels()]) {
+      if (entry.provider === provider) blocked.add(entry.model);
+    }
+    const snapshot = this.#providers.cachedUsageSnapshot(provider, agent.providerAccountId ?? undefined);
+    const usedPercent = quotaUsedPercentFromSnapshot(snapshot, null);
+    return { usedPercent, blockedModels: blocked };
   }
 
   notifyProviderSettingsChanged(): void {
@@ -4910,6 +4929,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
 
   deleteAgent(agentId: string): Effect.Effect<void, AgentLifecycleFailed> {
     return Effect.sync(() => this.#planContinuation.cancel(agentId)).pipe(
+      Effect.tap(() => Effect.sync(() => this.#autoModel.forgetAgent(agentId))),
       Effect.andThen(this.#removal.delete(agentId)),
       Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "deleteAgent", cause: failure.cause })),
     );

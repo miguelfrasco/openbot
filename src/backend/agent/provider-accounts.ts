@@ -563,6 +563,14 @@ export class ProviderAccounts {
     return this.#usage.get(accountId)?.limit ?? null;
   }
 
+  keptUsageSnapshot(accountId: string): { limit: AccountUsageLimit; readAt: number } | null {
+    const kept = this.#usage.get(accountId);
+    if (!kept) return null;
+    const readAt = this.#usageGate(accountId).lastReadAtMs();
+    if (!readAt) return null;
+    return { limit: kept.limit, readAt };
+  }
+
   readonly remove = Effect.fn("ProviderAccounts.remove")(function* (
     this: ProviderAccounts,
     provider: AgentProviderId,

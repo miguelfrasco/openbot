@@ -7,6 +7,7 @@ import { providerCheckTimeoutMs } from "../disk-restore";
 import { decodeModelListResponse, type ModelListResponse } from "./../protocol";
 import { providerFailure } from "../provider-client-effects";
 import { BUILT_IN_PROVIDER_DRIVERS, type BuiltInProviderDriver } from "./../provider-drivers";
+import { mergeAutoModelOptions } from "./auto-model/catalog";
 import {
   compareModelVersions,
   FALLBACK_MODELS,
@@ -46,7 +47,7 @@ export class ModelCatalog {
   }
 
   list(): AgentModelOption[] {
-    return structuredClone(this.#models);
+    return mergeAutoModelOptions(structuredClone(this.#models));
   }
 
   source(provider: AgentProvider): ProviderModelSource | undefined {
