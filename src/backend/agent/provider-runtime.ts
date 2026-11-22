@@ -951,6 +951,21 @@ export class ProviderRuntime implements ProviderPort {
     return this.#modelCatalog.list().filter((model) => !this.#off.has(model.provider));
   }
 
+  cachedUsageSnapshot(
+    provider: AgentProvider,
+    accountId: string | undefined,
+  ): { limit: AccountUsageLimit; readAt: number } | null {
+    const resolved = accountId ?? DEFAULT_PROVIDER_ACCOUNT_ID;
+    if (resolved === DEFAULT_PROVIDER_ACCOUNT_ID) {
+      const limit = this.#lastUsage.get(provider);
+      if (!limit) return null;
+      const readAt = this.#usageGate(provider).lastReadAtMs();
+      if (!readAt) return null;
+      return { limit, readAt };
+    }
+    return this.#providerAccounts?.keptUsageSnapshot(resolved) ?? null;
+  }
+
   readonly refreshModels = Effect.fn("ProviderRuntime.refreshModels")(function* (this: ProviderRuntime) {
     const fresh = yield* this.#refreshModelCatalog();
     this.#setStatus({});
