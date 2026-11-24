@@ -10,6 +10,7 @@ This repository tracks [nightly-labs/openbot](https://github.com/nightly-labs/op
 | `install-server.sh` | Downloads from `nightly-labs/openbot` releases | Honors `OPENBOT_RELEASES_URL` so a server can install fork builds |
 | Release branch | `main` only | `miguel-release` fast-forwards when [Fork upstream sync](.github/workflows/fork-upstream-sync.yml) succeeds |
 | Container image | `ghcr.io/nightly-labs/openbot` | `ghcr.io/miguelfrasco/openbot` on successful sync |
+| GitHub Releases | Upstream publishes all desktop targets | This fork publishes **linux arm64** AppImage, `latest-linux-arm64.yml`, and checksums for Pi and arm64 servers |
 
 License files and PolyForm Noncommercial notices are unchanged.
 
@@ -28,11 +29,14 @@ License files and PolyForm Noncommercial notices are unchanged.
 
 Workflow: `.github/workflows/fork-upstream-sync.yml`
 
-1. Nightly (and manual **workflow_dispatch**), fetch upstream release tags.
-2. Create `auto/<tag>` from the newest `v*` tag and cherry-pick commits on `main` that are not in that tag.
-3. Run `bun install --frozen-lockfile`, auto-model tests, and `bun run typecheck:node`.
-4. On success, fast-forward `miguel-release`, build `dist:linux:arm64`, upload artifacts, and push `ghcr.io/miguelfrasco/openbot:<tag>` and `:latest` (QEMU **buildx** on the free `ubuntu-latest` runner — GitHub does not provide free native arm64 runners for public repos as of 2026).
-5. On conflict or test failure, open a GitHub issue labeled `upstream-sync` and leave `miguel-release` unchanged.
+1. Nightly (and manual **workflow_dispatch**), read the newest `v*` tag from upstream.
+2. Skip when `miguel-release` already contains that tag and a GitHub Release with assets exists. Use **force** on manual runs to rebuild anyway.
+3. Create `auto/<tag>` from the upstream tag and cherry-pick commits on `main` that are not in that tag.
+4. Run `bun install --frozen-lockfile`, the 12 Auto model tests, and `bun run typecheck:node`.
+5. On success, fast-forward `miguel-release`, push matching tag `v*`, and run the **release** job on **`ubuntu-24.04-arm`** (native arm64).
+6. The release job installs Codex, Claude, and Grok provider runtimes (same as upstream Linux arm64), builds `dist:linux:arm64`, checks the package and updater metadata, and publishes a [GitHub Release](https://github.com/miguelfrasco/openbot/releases) with the AppImage, `latest-linux-arm64.yml`, and `SHA256SUMS-linux-arm64.txt` (`install-server.sh` and the in-app updater read these).
+7. Push `ghcr.io/miguelfrasco/openbot:<tag>`, `:<version>`, and `:latest`.
+8. On conflict or test failure, open a GitHub issue labeled `upstream-sync` and leave `miguel-release` unchanged.
 
 ## Install from fork builds
 
@@ -45,7 +49,7 @@ export OPENBOT_RELEASES_URL=https://github.com/miguelfrasco/openbot/releases
 curl -fsSL "https://raw.githubusercontent.com/miguelfrasco/openbot/miguel-release/scripts/install-server.sh" | sudo bash
 ```
 
-Releases are published from the sync workflow (GitHub release assets on `miguel-release` when configured) or from artifacts `openbot-linux-arm64-<tag>`.
+The install script reads `latest/download/latest-linux-arm64.yml` from that releases URL and downloads `OpenBot-<version>-arm64.AppImage`.
 
 **Back to official upstream:**
 
@@ -78,7 +82,8 @@ Stop the fork container, point your compose file or run command at `ghcr.io/nigh
 git remote add upstream https://github.com/nightly-labs/openbot.git
 git fetch upstream --tags
 git checkout main
-git rebase upstream/main
+git rebase upstream/v0.77.0
+git cherry-pick <your-fork-commits>
 ```
 
 Keep feature code in `src/backend/agent/auto-model/` and small integration hooks to ease rebases.
