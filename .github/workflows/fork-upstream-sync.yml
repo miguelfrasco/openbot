@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and republish when a GitHub Release for the upstream tag already exists
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,10 +18,20 @@ permissions:
 env:
   FORK_RELEASE_BRANCH: miguel-release
   UPSTREAM_REPO: nightly-labs/openbot
+  REGISTRY: ghcr.io
+  IMAGE_NAME: miguelfrasco/openbot
 
 jobs:
   sync:
+    name: Rebase fork onto upstream release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      skip_sync: ${{ steps.plan.outputs.skip_sync }}
+      rebase_conflict: ${{ steps.rebase.outputs.rebase_conflict }}
+      work_branch: ${{ steps.plan.outputs.work_branch }}
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -25,43 +40,78 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
+        uses: ./.github/actions/setup-bun
 
       - name: Add upstream remote
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream --tags --force
+          git fetch upstream main --tags --force
           git fetch origin --force
 
       - name: Find newest upstream release tag
         id: tag
         run: |
-          tag="$(git for-each-ref --sort=-v:refname --format='%(refname:short)' "refs/tags/v*" | head -n 1)"
+          set -euo pipefail
+          tag="$(git ls-remote --tags --refs --sort=-v:refname "https://github.com/${UPSTREAM_REPO}.git" 'refs/tags/v*' | head -n 1 | awk '{print $2}' | sed 's#^refs/tags/##')"
           [ -n "$tag" ] || { echo "No upstream release tag found." >&2; exit 1; }
+          version="${tag#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Upstream tag: $tag"
 
-      - name: Skip when sync branch already exists
-        id: skip
-        run: |
-          branch="auto/${{ steps.tag.outputs.tag }}"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Rebase fork commits onto upstream tag
-        if: steps.skip.outputs.skip != 'true'
-        id: rebase
+      - name: Decide whether sync is needed
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
           work_branch="auto/$tag"
+          echo "work_branch=$work_branch" >> "$GITHUB_OUTPUT"
+          skip=false
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "skip_sync=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$FORK_RELEASE_BRANCH" >/dev/null 2>&1; then
+            release_tip="$(git rev-parse "origin/$FORK_RELEASE_BRANCH")"
+            if git merge-base --is-ancestor "$tag" "$release_tip"; then
+              asset_count="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length' 2>/dev/null || echo 0)"
+              if [ "$asset_count" -gt 0 ]; then
+                skip=true
+              fi
+            fi
+          fi
+          echo "skip_sync=$skip" >> "$GITHUB_OUTPUT"
+          if [ "$skip" = true ]; then
+            echo "Release $tag is already on $FORK_RELEASE_BRANCH with GitHub Release assets."
+          fi
+
+      - name: Rebase fork commits onto upstream tag
+        if: steps.plan.outputs.skip_sync != 'true'
+        id: rebase
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          work_branch="${{ steps.plan.outputs.work_branch }}"
           git checkout -B "$work_branch" "$tag"
-          commits="$(git rev-list --reverse "$tag..origin/main" || true)"
+          main_tip="$(git rev-parse origin/main)"
+          parent_count="$(git rev-list -n 1 --parents "$main_tip" | awk '{print NF - 1}')"
+          if [ "$parent_count" -eq 2 ]; then
+            parent_one="$(git rev-parse "$main_tip^1")"
+            parent_two="$(git rev-parse "$main_tip^2")"
+            if git merge-base --is-ancestor "$tag" "$parent_one"; then
+              fork_tip="$parent_one"
+            elif git merge-base --is-ancestor "$tag" "$parent_two"; then
+              fork_tip="$parent_two"
+            else
+              fork_tip="$parent_one"
+            fi
+          else
+            fork_tip="$main_tip"
+          fi
+          commits="$(git rev-list --reverse --no-merges "$tag..$fork_tip" --not upstream/main || true)"
           if [ -z "$commits" ]; then
             echo "rebase_conflict=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -73,57 +123,26 @@ jobs:
           fi
           echo "rebase_conflict=false" >> "$GITHUB_OUTPUT"
 
-      - name: Install and test
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
+      - name: Run Auto model tests
+        if: steps.plan.outputs.skip_sync != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
         run: |
-          bun install --frozen-lockfile
-          bun run test:related -- src/backend/agent/auto-model/auto-model.router.test.ts
+          bun run test:related -- src/backend/agent/auto-model/auto-model.router.test.ts src/backend/agent/auto-model/quota-snapshot.test.ts
           bun run typecheck:node
 
       - name: Fast-forward release branch
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
+        if: steps.plan.outputs.skip_sync != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
         run: |
-          git push -u origin "auto/${{ steps.tag.outputs.tag }}"
-          git branch -f "$FORK_RELEASE_BRANCH" "auto/${{ steps.tag.outputs.tag }}"
+          set -euo pipefail
+          work_branch="${{ steps.plan.outputs.work_branch }}"
+          tag="${{ steps.tag.outputs.tag }}"
+          git push -u origin "$work_branch"
+          git branch -f "$FORK_RELEASE_BRANCH" "$work_branch"
           git push -f origin "$FORK_RELEASE_BRANCH"
-
-      - name: Build linux arm64 AppImage
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
-        run: bun run dist:linux:arm64
-
-      - name: Upload server release artifacts
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: openbot-linux-arm64-${{ steps.tag.outputs.tag }}
-          path: |
-            dist/*.AppImage
-            dist/latest-linux-arm64.yml
-            dist/SHA256SUMS-linux-arm64.txt
-
-      - name: Set up Docker buildx
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
-        uses: docker/setup-buildx-action@v3
-
-      - name: Publish Docker image to GHCR
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict != 'true'
-        env:
-          REGISTRY: ghcr.io
-          IMAGE_NAME: miguelfrasco/openbot
-        run: |
-          appimage="$(echo dist/*.AppImage)"
-          cp "$appimage" docker/OpenBot.AppImage
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
-          docker buildx build \
-            --platform linux/arm64 \
-            --file docker/Dockerfile \
-            --tag "$REGISTRY/$IMAGE_NAME:${{ steps.tag.outputs.tag }}" \
-            --tag "$REGISTRY/$IMAGE_NAME:latest" \
-            --push \
-            docker
+          git tag -f "$tag" "$work_branch"
+          git push -f origin "refs/tags/$tag"
 
       - name: Open sync failure issue
-        if: steps.skip.outputs.skip != 'true' && steps.rebase.outputs.rebase_conflict == 'true'
+        if: steps.plan.outputs.skip_sync != 'true' && steps.rebase.outputs.rebase_conflict == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -143,3 +162,125 @@ jobs:
               body,
               labels: ["upstream-sync"]
             });
+
+  release:
+    name: Build and publish linux arm64 release
+    needs: sync
+    if: needs.sync.outputs.skip_sync != 'true' && needs.sync.outputs.rebase_conflict != 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      RELEASE_VERSION: ${{ needs.sync.outputs.version }}
+      RELEASE_TAG: ${{ needs.sync.outputs.tag }}
+      SUFFIX: linux-arm64
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_RELEASE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install a virtual display for the launch check
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes xvfb
+
+      - name: Install and verify provider control artifacts
+        run: |
+          bun scripts/install-codex-runtime.ts linux arm64
+          bun scripts/install-claude-runtime.ts linux arm64
+          bun scripts/install-grok-runtime.ts linux arm64
+
+      - name: Build AppImage
+        run: bun run dist:linux:arm64
+
+      - name: Permit the Electron sandbox for the verification build
+        run: |
+          set -euo pipefail
+          sudo chown root:root "dist/$SUFFIX-unpacked/chrome-sandbox"
+          sudo chmod 4755 "dist/$SUFFIX-unpacked/chrome-sandbox"
+          sudo tee /etc/apparmor.d/openbot-fork-verify >/dev/null <<PROFILE
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile openbot-fork-verify "$GITHUB_WORKSPACE/dist/$SUFFIX-unpacked/openbot" flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/openbot-fork-verify
+
+      - name: Verify packaged application metadata and launch
+        run: xvfb-run -a bun run verify:package:linux "dist/$SUFFIX-unpacked" --require-update-metadata
+
+      - name: Verify AppImage and updater metadata
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          appImages=(dist/*.AppImage)
+          if [ "${#appImages[@]}" -ne 1 ] || [ ! -f "dist/latest-$SUFFIX.yml" ]; then
+            echo "Expected one AppImage and dist/latest-$SUFFIX.yml." >&2
+            exit 1
+          fi
+          if [ ! -x "${appImages[0]}" ]; then
+            echo "The AppImage is not executable." >&2
+            exit 1
+          fi
+          grep -Fq "version: $RELEASE_VERSION" "dist/latest-$SUFFIX.yml"
+          grep -Fq ".AppImage" "dist/latest-$SUFFIX.yml"
+          bun run verify:update-artifacts "$SUFFIX"
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 ./*.AppImage | sed 's| \./| |' > "SHA256SUMS-$SUFFIX.txt"
+          cat "SHA256SUMS-$SUFFIX.txt"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(dist/*.AppImage dist/latest-$SUFFIX.yml dist/SHA256SUMS-$SUFFIX.txt)
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$RELEASE_TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" \
+              "${artifacts[@]}" \
+              --generate-notes \
+              --latest \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "OpenBot $RELEASE_TAG (fork)"
+          fi
+
+      - name: Build Docker image
+        run: |
+          set -euo pipefail
+          mkdir image
+          appImage="$(echo dist/*.AppImage)"
+          cp "$appImage" image/OpenBot.AppImage
+          docker build \
+            --file docker/Dockerfile \
+            --platform linux/arm64 \
+            --build-arg "VERSION=$RELEASE_VERSION" \
+            --build-arg "REVISION=$GITHUB_SHA" \
+            --tag openbot:release \
+            image
+
+      - name: Publish Docker image to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login "$REGISTRY" --username "$GITHUB_ACTOR" --password-stdin
+          docker tag openbot:release "$REGISTRY/$IMAGE_NAME:$RELEASE_VERSION"
+          docker tag openbot:release "$REGISTRY/$IMAGE_NAME:$RELEASE_TAG"
+          docker tag openbot:release "$REGISTRY/$IMAGE_NAME:latest"
+          docker push "$REGISTRY/$IMAGE_NAME:$RELEASE_VERSION"
+          docker push "$REGISTRY/$IMAGE_NAME:$RELEASE_TAG"
+          docker push "$REGISTRY/$IMAGE_NAME:latest"
