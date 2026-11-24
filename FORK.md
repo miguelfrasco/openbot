@@ -31,7 +31,7 @@ Workflow: `.github/workflows/fork-upstream-sync.yml`
 
 1. Nightly (and manual **workflow_dispatch**), read the newest `v*` tag from upstream.
 2. Skip when `miguel-release` already contains that tag and a GitHub Release with assets exists. Use **force** on manual runs to rebuild anyway.
-3. Create `auto/<tag>` from the upstream tag and cherry-pick commits on `main` that are not in that tag.
+3. Create `auto/<tag>` from the upstream tag and cherry-pick fork-only commits from `main` (`--not upstream/main`, no merge commits). When `main` has a merge commit, follow the parent that already contains the upstream tag (the v0.77+ fork line), not the old v0.76.1 squash parent.
 4. Run `bun install --frozen-lockfile`, the 12 Auto model tests, and `bun run typecheck:node`.
 5. On success, fast-forward `miguel-release`, push matching tag `v*`, and run the **release** job on **`ubuntu-24.04-arm`** (native arm64).
 6. The release job installs Codex, Claude, and Grok provider runtimes (same as upstream Linux arm64), builds `dist:linux:arm64`, checks the package and updater metadata, and publishes a [GitHub Release](https://github.com/miguelfrasco/openbot/releases) with the AppImage, `latest-linux-arm64.yml`, and `SHA256SUMS-linux-arm64.txt` (`install-server.sh` and the in-app updater read these).

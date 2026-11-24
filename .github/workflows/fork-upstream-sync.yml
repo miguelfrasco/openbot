@@ -45,7 +45,7 @@ jobs:
       - name: Add upstream remote
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
-          git fetch upstream --tags --force
+          git fetch upstream main --tags --force
           git fetch origin --force
 
       - name: Find newest upstream release tag
@@ -96,7 +96,22 @@ jobs:
           tag="${{ steps.tag.outputs.tag }}"
           work_branch="${{ steps.plan.outputs.work_branch }}"
           git checkout -B "$work_branch" "$tag"
-          commits="$(git rev-list --reverse "$tag..origin/main" || true)"
+          main_tip="$(git rev-parse origin/main)"
+          parent_count="$(git rev-list -n 1 --parents "$main_tip" | awk '{print NF - 1}')"
+          if [ "$parent_count" -eq 2 ]; then
+            parent_one="$(git rev-parse "$main_tip^1")"
+            parent_two="$(git rev-parse "$main_tip^2")"
+            if git merge-base --is-ancestor "$tag" "$parent_one"; then
+              fork_tip="$parent_one"
+            elif git merge-base --is-ancestor "$tag" "$parent_two"; then
+              fork_tip="$parent_two"
+            else
+              fork_tip="$parent_one"
+            fi
+          else
+            fork_tip="$main_tip"
+          fi
+          commits="$(git rev-list --reverse --no-merges "$tag..$fork_tip" --not upstream/main || true)"
           if [ -z "$commits" ]; then
             echo "rebase_conflict=false" >> "$GITHUB_OUTPUT"
             exit 0
